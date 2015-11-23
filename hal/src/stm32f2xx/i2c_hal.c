@@ -455,13 +455,13 @@ void HAL_I2C_Begin_Transmission(HAL_I2C_Interface i2c, uint8_t address, void* re
 
 uint8_t HAL_I2C_End_Transmission(HAL_I2C_Interface i2c, uint8_t stop, void* reserved)
 {
-    uint32_t _millis;
+    uint32_t _micros;
 
-    _millis = HAL_Timer_Get_Milli_Seconds();
+    _micros = HAL_Timer_Get_Micro_Seconds();
     /* While the I2C Bus is busy */
     while(I2C_GetFlagStatus(i2cMap[i2c]->I2C_Peripheral, I2C_FLAG_BUSY))
     {
-        if(EVENT_TIMEOUT < (HAL_Timer_Get_Milli_Seconds() - _millis))
+        if((1000*EVENT_TIMEOUT) < (HAL_Timer_Get_Micro_Seconds() - _micros))
         {
             /* SW Reset the I2C Peripheral */
             HAL_I2C_SoftwareReset(i2c);
@@ -473,10 +473,10 @@ uint8_t HAL_I2C_End_Transmission(HAL_I2C_Interface i2c, uint8_t stop, void* rese
     /* Send START condition */
     I2C_GenerateSTART(i2cMap[i2c]->I2C_Peripheral, ENABLE);
 
-    _millis = HAL_Timer_Get_Milli_Seconds();
+    _micros = HAL_Timer_Get_Micro_Seconds();
     while(!I2C_CheckEvent(i2cMap[i2c]->I2C_Peripheral, I2C_EVENT_MASTER_MODE_SELECT))
     {
-        if(EVENT_TIMEOUT < (HAL_Timer_Get_Milli_Seconds() - _millis))
+        if((1000*EVENT_TIMEOUT) < (HAL_Timer_Get_Micro_Seconds() - _micros))
         {
             /* SW Reset the I2C Peripheral */
             HAL_I2C_SoftwareReset(i2c);
@@ -491,20 +491,20 @@ uint8_t HAL_I2C_End_Transmission(HAL_I2C_Interface i2c, uint8_t stop, void* rese
     /* Send Slave address for write */
     I2C_Send7bitAddress(i2cMap[i2c]->I2C_Peripheral, i2cMap[i2c]->txAddress, I2C_Direction_Transmitter);
 
-    _millis = HAL_Timer_Get_Milli_Seconds();
+    _micros = HAL_Timer_Get_Micro_Seconds();
     while(!I2C_CheckEvent(i2cMap[i2c]->I2C_Peripheral, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED))
     {
         /* STOP/RESET immediately if ACK failure detected */
-        if(EVENT_TIMEOUT < (HAL_Timer_Get_Milli_Seconds() - _millis) || i2cMap[i2c]->ackFailure)
+        if((1000*EVENT_TIMEOUT) < (HAL_Timer_Get_Micro_Seconds() - _micros) || i2cMap[i2c]->ackFailure)
         {
             /* Send STOP Condition */
             I2C_GenerateSTOP(i2cMap[i2c]->I2C_Peripheral, ENABLE);
 
             /* Wait to make sure that STOP control bit has been cleared */
-            _millis = HAL_Timer_Get_Milli_Seconds();
+            _micros = HAL_Timer_Get_Micro_Seconds();
             while(i2cMap[i2c]->I2C_Peripheral->CR1 & I2C_CR1_STOP)
             {
-                if(EVENT_TIMEOUT < (HAL_Timer_Get_Milli_Seconds() - _millis))
+                if((1000*EVENT_TIMEOUT) < (HAL_Timer_Get_Micro_Seconds() - _micros))
                 {
                     break;
                 }
@@ -532,10 +532,10 @@ uint8_t HAL_I2C_End_Transmission(HAL_I2C_Interface i2c, uint8_t stop, void* rese
         /* Point to the next byte to be written */
         pBuffer++;
 
-        _millis = HAL_Timer_Get_Milli_Seconds();
+        _micros = HAL_Timer_Get_Micro_Seconds();
         while(!I2C_CheckEvent(i2cMap[i2c]->I2C_Peripheral, I2C_EVENT_MASTER_BYTE_TRANSMITTING))
         {
-            if(EVENT_TIMEOUT < (HAL_Timer_Get_Milli_Seconds() - _millis))
+            if((1000*EVENT_TIMEOUT) < (HAL_Timer_Get_Micro_Seconds() - _micros))
             {
                 /* SW Reset the I2C Peripheral */
                 HAL_I2C_SoftwareReset(i2c);
@@ -544,10 +544,10 @@ uint8_t HAL_I2C_End_Transmission(HAL_I2C_Interface i2c, uint8_t stop, void* rese
             }
         }
 
-        _millis = HAL_Timer_Get_Milli_Seconds();
+        _micros = HAL_Timer_Get_Micro_Seconds();
         while(I2C_GetFlagStatus(i2cMap[i2c]->I2C_Peripheral, I2C_FLAG_BTF) == RESET)
         {
-            if(EVENT_TIMEOUT < (HAL_Timer_Get_Milli_Seconds() - _millis))
+            if((1000*EVENT_TIMEOUT) < (HAL_Timer_Get_Micro_Seconds() - _micros))
             {
                 /* SW Reset the I2C Peripheral */
                 HAL_I2C_SoftwareReset(i2c);
