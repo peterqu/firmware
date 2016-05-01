@@ -511,19 +511,20 @@ public:
     bool remove(socket_t* item)
     {
         bool removed = false;
-            if (items==item) {
-                items = item->next;
-            removed = true;
-        }
+		if (items==item) {
+			items = item->next;
+			removed = true;
+		}
         else
         {
-                socket_t* current = items;
+			socket_t* current = items;
             while (current) {
                 if (current->next==item) {
                     current->next = item->next;
                     removed = true;
                     break;
                 }
+                current = current->next;
             }
         }
         return removed;
@@ -1049,7 +1050,7 @@ sock_result_t socket_receivefrom(sock_handle_t sd, void* buffer, socklen_t bufLe
             wiced_packet_delete(packet);
         }
     }
-    return result!=WICED_SUCCESS ? as_sock_result(result) : sock_result_t(read_len);
+    return result!=WICED_SUCCESS && result!=WICED_TIMEOUT ? as_sock_result(result) : sock_result_t(read_len);
 }
 
 

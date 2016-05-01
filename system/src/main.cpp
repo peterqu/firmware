@@ -47,10 +47,39 @@
 #include "ledcontrol.h"
 #include "spark_wiring_power.h"
 #include "spark_wiring_fuel.h"
+#include "spark_wiring_interrupts.h"
+#include "spark_wiring_cellular.h"
+#include "spark_wiring_cellularsignal.h"
+
+using namespace spark;
 
 /* Private typedef -----------------------------------------------------------*/
 
 /* Private define ------------------------------------------------------------*/
+#if Wiring_SetupButtonUX
+#if defined(DEBUG_BUTTON_WD)
+#define BUTTON_WD_DEBUG(x,...) DEBUG(x,__VA_ARGS__)
+#else
+#define BUTTON_WD_DEBUG(x,...)
+#endif
+
+static volatile uint32_t button_timeout_start;
+static volatile uint32_t button_timeout_duration;
+
+inline void ARM_BUTTON_TIMEOUT(uint32_t dur) {
+    button_timeout_start = HAL_Timer_Get_Milli_Seconds();
+    button_timeout_duration = dur;
+    BUTTON_WD_DEBUG("Button WD Set %d",(dur));
+}
+inline bool IS_BUTTON_TIMEOUT() {
+    return button_timeout_duration && ((HAL_Timer_Get_Milli_Seconds()-button_timeout_start)>button_timeout_duration);
+}
+
+inline void CLR_BUTTON_TIMEOUT() {
+    button_timeout_duration = 0;
+    BUTTON_WD_DEBUG("Button WD Cleared, was %d",button_timeout_duration);
+}
+#endif // #if Wiring_SetupButtonUX
 
 /* Private macro -------------------------------------------------------------*/
 
@@ -64,19 +93,75 @@ static volatile uint32_t TimingIWDGReload;
  */
 static volatile bool wasListeningOnButtonPress;
 /**
- * The lower 16-bits of the time when the button was first pushed.
+ * The lower 16-bits of the time when the button was first pressed.
  */
-static volatile uint16_t buttonPushed;
+static volatile uint16_t pressed_time;
 
 uint16_t system_button_pushed_duration(uint8_t button, void*)
 {
     if (button || network.listening())
         return 0;
-    return buttonPushed ? HAL_Timer_Get_Milli_Seconds()-buttonPushed : 0;
+    return pressed_time ? HAL_Timer_Get_Milli_Seconds()-pressed_time : 0;
 }
+
+#if Wiring_SetupButtonUX
+/* flag used to initiate system_handle_single_click() from main thread */
+static volatile bool SYSTEM_HANDLE_SINGLE_CLICK = false;
 
 static uint32_t prev_release_time = 0;
 static uint8_t clicks = 0;
+
+/* single click handler displays RSSI value on system LED */
+void system_handle_single_click()
+{
+    /*   signal strength (u-Blox Sara U2 and G3 modules)
+     *   0: < -105 dBm
+     *   1: < -93 dBm
+     *   2: < -81 dBm
+     *   3: < -69 dBm
+     *   4: < - 57 dBm
+     *   5: >= -57 dBm
+     */
+    if (SYSTEM_HANDLE_SINGLE_CLICK) {
+        SYSTEM_HANDLE_SINGLE_CLICK = false;
+        volatile system_tick_t startTime = SYSTEM_TICK_COUNTER;
+        RGB.control(true);
+        RGB.color(0,10,0);
+        int rssi = 0;
+        int bars = 0;
+#if Wiring_WiFi == 1
+        rssi = WiFi.RSSI();
+#elif Wiring_Cellular == 1
+        CellularSignal sig = Cellular.RSSI();
+        rssi = sig.rssi;
+#endif
+        if (rssi < 0) {
+            if (rssi >= -57) bars = 5;
+            else if (rssi > -68) bars = 4;
+            else if (rssi > -80) bars = 3;
+            else if (rssi > -92) bars = 2;
+            else if (rssi > -104) bars = 1;
+        }
+        DEBUG("RSSI: %ddB BARS: %d\r\n", rssi, bars);
+
+        /* flash sequence */
+        /* TODO - REFACTOR Flash Sequence to be non-blocking via HAL_SysTick_Handler() */
+
+        // Attempts to normalize beginning dim green time to 1 second
+        while ( (SYSTEM_TICK_COUNTER - startTime) < (SYSTEM_US_TICKS*1000UL*1000UL) );
+
+        if (bars > 0) {
+            for (int x=0; x<bars; x++) {
+                RGB.color(0,255,0);
+                delay(40);
+                RGB.color(0,10,0);
+                delay(250);
+            }
+        }
+        delay(750);
+        RGB.control(false);
+    }
+}
 
 void system_handle_double_click()
 {
@@ -84,32 +169,42 @@ void system_handle_double_click()
     network.connect_cancel(true, true);
 }
 
-void handle_button_click(uint16_t duration, uint32_t release_time)
+void reset_button_click(uint32_t release_time)
 {
-    uint32_t start_time = release_time-duration;
-    uint32_t since_prev = start_time-prev_release_time;
+    clicks = 0;
+    prev_release_time = release_time - 1000;
+    CLR_BUTTON_TIMEOUT();
+}
+
+void handle_button_click(uint16_t depressed_duration, uint32_t release_time)
+{
+    uint32_t start_time = release_time - depressed_duration;
+    uint32_t since_prev = start_time - prev_release_time;
     bool reset = true;
-    if (duration<500) {                                 // a short button press
+    if (depressed_duration<500) {               // a short button press
         if (!clicks || (since_prev<1000)) {		// first click or within 1 second of the previous click
             clicks++;
             prev_release_time = release_time;
-            if (clicks==2)
+            if (clicks == 1)
             {
-                clicks = 0;
-                prev_release_time = release_time-1000;
-                system_handle_double_click();
-            }
-            else {
+                // If a second button press doesn't come within 1.5 seconds,
+                // declare a single button press valid.
+                ARM_BUTTON_TIMEOUT(1500);
                 reset = false;
+            }
+            else if (clicks == 2)
+            {
+                reset_button_click(release_time);
+                system_handle_double_click();
             }
         }
     }
     if (reset) {
-        prev_release_time = release_time-1000;	//
-        clicks = 0;
+        reset_button_click(release_time);
     }
 
 }
+#endif // #if Wiring_SetupButtonUX
 
 // this is called on multiple threads - ideally need a mutex
 void HAL_Notify_Button_State(uint8_t button, uint8_t pressed)
@@ -119,7 +214,7 @@ void HAL_Notify_Button_State(uint8_t button, uint8_t pressed)
         if (pressed)
         {
             wasListeningOnButtonPress = network.listening();
-            buttonPushed = HAL_Timer_Get_Milli_Seconds();
+            pressed_time = HAL_Timer_Get_Milli_Seconds();
             if (!wasListeningOnButtonPress)             // start of button press
             {
                 system_notify_event(button_status, 0);
@@ -128,18 +223,92 @@ void HAL_Notify_Button_State(uint8_t button, uint8_t pressed)
         else
         {
             int release_time = HAL_Timer_Get_Milli_Seconds();
-            uint16_t duration = release_time-buttonPushed;
+            uint16_t depressed_duration = release_time - pressed_time;
 
             if (!network.listening()) {
-                system_notify_event(button_status, duration);
-                handle_button_click(duration, release_time);
+                system_notify_event(button_status, depressed_duration);
+#if Wiring_SetupButtonUX
+                handle_button_click(depressed_duration, release_time);
+#endif
             }
-            buttonPushed = 0;
-            if (duration>3000 && duration<8000 && wasListeningOnButtonPress && network.listening())
+            pressed_time = 0;
+            if (depressed_duration>3000 && depressed_duration<8000 && wasListeningOnButtonPress && network.listening())
                 network.listen(true);
         }
     }
 }
+
+#if Wiring_Cellular == 1
+/* flag used to initiate system_power_management_update() from main thread */
+static volatile bool SYSTEM_POWER_MGMT_UPDATE = false;
+
+/*******************************************************************************
+ * Function Name  : Power_Management_Handler
+ * Description    : Sets default power management IC charging rate when USB
+                    input power source changes or low battery indicated by
+                    fuel gauge IC.
+ * Output         : SYSTEM_POWER_MGMT_UPDATE is set to true.
+ *******************************************************************************/
+extern "C" void Power_Management_Handler(void)
+{
+    SYSTEM_POWER_MGMT_UPDATE = true;
+}
+
+void system_power_management_init()
+{
+    INFO("Power Management Initializing.");
+    PMIC power;
+    power.begin();
+    power.disableWatchdog();
+    power.disableDPDM();
+    // power.setInputVoltageLimit(4360); // default
+    power.setInputCurrentLimit(900);     // 900mA
+    power.setChargeCurrent(0,0,0,0,0,0); // 512mA
+    power.setChargeVoltage(4112);        // 4.112V termination voltage
+    FuelGauge fuel;
+    fuel.wakeup();
+    fuel.setAlertThreshold(10); // Low Battery alert at 10% (about 3.6V)
+    fuel.clearAlert(); // Ensure this is cleared, or interrupts will never occur
+    INFO("State of Charge: %-6.2f%%", fuel.getSoC());
+    INFO("Battery Voltage: %-4.2fV", fuel.getVCell());
+    attachInterrupt(LOW_BAT_UC, Power_Management_Handler, FALLING);
+}
+
+void system_power_management_update()
+{
+    if (SYSTEM_POWER_MGMT_UPDATE) {
+        SYSTEM_POWER_MGMT_UPDATE = false;
+        PMIC power;
+        power.begin();
+        power.setInputCurrentLimit(900);     // 900mA
+        power.setChargeCurrent(0,0,0,0,0,0); // 512mA
+        FuelGauge fuel;
+        bool LOWBATT = fuel.getAlert();
+        if (LOWBATT) {
+            fuel.clearAlert(); // Clear the Low Battery Alert flag if set
+        }
+        INFO(" %s", (LOWBATT)?"Low Battery Alert":"PMIC Interrupt");
+#ifdef DEBUG_BUILD
+        uint8_t stat = power.getSystemStatus();
+        uint8_t fault = power.getFault();
+        uint8_t vbus_stat = stat >> 6; // 0 – Unknown (no input, or DPDM detection incomplete), 1 – USB host, 2 – Adapter port, 3 – OTG
+        uint8_t chrg_stat = (stat >> 4) & 0x03; // 0 – Not Charging, 1 – Pre-charge (<VBATLOWV), 2 – Fast Charging, 3 – Charge Termination Done
+        bool dpm_stat = stat & 0x08;   // 0 – Not DPM, 1 – VINDPM or IINDPM
+        bool pg_stat = stat & 0x04;    // 0 – Not Power Good, 1 – Power Good
+        bool therm_stat = stat & 0x02; // 0 – Normal, 1 – In Thermal Regulation
+        bool vsys_stat = stat & 0x01;  // 0 – Not in VSYSMIN regulation (BAT > VSYSMIN), 1 – In VSYSMIN regulation (BAT < VSYSMIN)
+        bool wd_fault = fault & 0x80;  // 0 – Normal, 1- Watchdog timer expiration
+        uint8_t chrg_fault = (fault >> 4) & 0x03; // 0 – Normal, 1 – Input fault (VBUS OVP or VBAT < VBUS < 3.8 V),
+                                                  // 2 - Thermal shutdown, 3 – Charge Safety Timer Expiration
+        bool bat_fault = fault & 0x08;    // 0 – Normal, 1 – BATOVP
+        uint8_t ntc_fault = fault & 0x07; // 0 – Normal, 5 – Cold, 6 – Hot
+        DEBUG_D("[ PMIC STAT ] VBUS:%d CHRG:%d DPM:%d PG:%d THERM:%d VSYS:%d\r\n", vbus_stat, chrg_stat, dpm_stat, pg_stat, therm_stat, vsys_stat);
+        DEBUG_D("[ PMIC FAULT ] WATCHDOG:%d CHRG:%d BAT:%d NTC:%d\r\n", wd_fault, chrg_fault, bat_fault, ntc_fault);
+        delay(50);
+#endif
+    }
+}
+#endif
 
 /*******************************************************************************
  * Function Name  : HAL_SysTick_Handler
@@ -239,6 +408,14 @@ extern "C" void HAL_SysTick_Handler(void)
         TimingIWDGReload++;
     }
 #endif
+
+#if Wiring_SetupButtonUX
+    if (IS_BUTTON_TIMEOUT())
+    {
+        reset_button_click(button_timeout_start);
+        SYSTEM_HANDLE_SINGLE_CLICK = true;
+    }
+#endif
 }
 
 void manage_safe_mode()
@@ -280,6 +457,12 @@ void app_loop(bool threaded)
                 DECLARE_SYS_HEALTH(RAN_Loop);
 #if !MODULAR_FIRMWARE
                 serialEventRun();
+#endif
+#if Wiring_Cellular == 1
+                system_power_management_update();
+#endif
+#if Wiring_SetupButtonUX
+                system_handle_single_click(); // display RSSI value on system LED for WiFi or Cellular
 #endif
             }
         }
@@ -323,8 +506,10 @@ void app_setup_and_loop(void)
     HAL_Core_Init();
     // We have running firmware, otherwise we wouldn't have gotten here
     DECLARE_SYS_HEALTH(ENTERED_Main);
-    PMIC().begin();
-    FuelGauge().wakeup();
+
+#if Wiring_Cellular == 1
+    system_power_management_init();
+#endif
 
     DEBUG("Hello from Particle!");
     String s = spark_deviceID();
